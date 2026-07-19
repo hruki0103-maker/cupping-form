@@ -722,8 +722,8 @@ const MILESTONE_DEFS = [
 // 時系列ステップ。stage は温度帯メモに付くタグ（旧版と同じ文字列を使い、データ互換を保つ）
 const STEPS = [
   { key: "prep",  name: "準備",        time: "注湯前",    sub: "セッション情報・サンプル・目安時刻の設定" },
-  { key: "frag",  name: "フレグランス", time: "注湯前",    sub: "粉の香りを全サンプル順にチェック", items: ["fragrance"], layout: "stack" },
-  // アロマは香りの気づきだけ残せるよう、語彙チップを欠陥系・フレーバー系に絞って表示（noteGroups）
+  // 香りのステップは気づきも残せるよう、語彙チップを欠陥系・フレーバー系に絞って表示（noteGroups）
+  { key: "frag",  name: "フレグランス", time: "注湯前",    sub: "粉の香りを全サンプル順にチェック", items: ["fragrance"], stage: "フレグランス", noteGroups: ["欠陥系", "フレーバー系"], layout: "stack" },
   { key: "aroma", name: "アロマ",      time: "0:00–4:00", sub: "注湯〜ブレイクの香り", items: ["aroma"], stage: "アロマ", noteGroups: ["欠陥系", "フレーバー系"], layout: "stack" },
   { key: "hot",   name: "ホット",      time: "〜10分",    sub: "1巡目：全項目の仮スコア＋気づき", items: TASTE_KEYS, stage: "熱い", defects: true, layout: "accordion" },
   { key: "warm",  name: "ウォーム",    time: "〜20分",    sub: "2巡目：スコアを調整＋気づき", items: TASTE_KEYS, stage: "温かい", defects: true, layout: "accordion" },
@@ -733,9 +733,15 @@ const STEPS = [
 
 const STORAGE_KEY = "cupping_form_state_v1";
 
+// 端末のローカル時刻で今日の日付を作る（toISOStringはUTCのため、日本時間の朝9時前に前日になってしまう）
+function todayLocal() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 function defaultState() {
   return {
-    sessionDate: new Date().toISOString().slice(0, 10),
+    sessionDate: todayLocal(),
     sessionNote: "",
     sampleOrder: ["A", "B", "C", "D", "E", "Ref"],
     currentSample: "A",
@@ -1025,6 +1031,27 @@ function renderContent() {
   else renderScoreStep(step);
 }
 
+// 全データリセット（準備・まとめの両ステップから呼ぶ。タイマーも初期化される）
+function confirmResetAll() {
+  if (!confirm("すべてのデータを消して、新しいセッションを始めますか？この操作は取り消せません。")) return;
+  state = migrate(defaultState()); // migrateを通して全サンプルの入れ物まで作った完全な初期状態にする
+  openCards = new Set(state.sampleOrder.length ? [state.sampleOrder[0]] : []);
+  alertUntil = 0;
+  releaseWakeLock();
+  save();
+  updateTimerButtons();
+  renderAll();
+  tick();
+}
+
+function buildResetRow() {
+  const row = document.createElement("div");
+  row.className = "btn-row";
+  row.innerHTML = `<button class="btn warn">全データをリセット（新しいセッションを始める）</button>`;
+  row.querySelector("button").onclick = confirmResetAll;
+  return row;
+}
+
 /* 準備ステップ：セッション情報・サンプル管理・目安時刻 */
 function renderPrep(step) {
   const c = document.getElementById("content");
@@ -1107,6 +1134,9 @@ function renderPrep(step) {
     msPanel.appendChild(row);
   });
   c.appendChild(msPanel);
+
+  // 前回セッションのデータを消してから始められるように、リセットをここにも置く
+  c.appendChild(buildResetRow());
 }
 
 /* 採点ステップ（フレグランス／アロマ／ホット／ウォーム／コールド） */
@@ -1389,22 +1419,8 @@ function renderWrap(step) {
     });
   };
 
-  // 全リセット
-  const resetRow = document.createElement("div");
-  resetRow.className = "btn-row";
-  resetRow.innerHTML = `<button class="btn warn">全データをリセット（新しいセッションを始める）</button>`;
-  resetRow.querySelector("button").onclick = () => {
-    if (!confirm("すべてのデータを消して、新しいセッションを始めますか？この操作は取り消せません。")) return;
-    state = defaultState();
-    openCards = new Set(state.sampleOrder.length ? [state.sampleOrder[0]] : []);
-    alertUntil = 0;
-    releaseWakeLock();
-    save();
-    updateTimerButtons();
-    renderAll();
-    tick();
-  };
-  c.appendChild(resetRow);
+  // 全リセット（準備ステップと共通）
+  c.appendChild(buildResetRow());
 
   const footer = document.createElement("footer");
   footer.textContent = "データはこのブラウザ内(localStorage)だけに保存されます。他の端末とは共有されません。";
