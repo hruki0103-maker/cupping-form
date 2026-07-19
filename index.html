@@ -723,10 +723,11 @@ const MILESTONE_DEFS = [
 const STEPS = [
   { key: "prep",  name: "準備",        time: "注湯前",    sub: "セッション情報・サンプル・目安時刻の設定" },
   { key: "frag",  name: "フレグランス", time: "注湯前",    sub: "粉の香りを全サンプル順にチェック", items: ["fragrance"], layout: "stack" },
-  { key: "aroma", name: "アロマ",      time: "0:00–4:00", sub: "注湯〜ブレイクの香り", items: ["aroma"], layout: "stack" },
-  { key: "hot",   name: "ホット",      time: "〜10分",    sub: "1巡目：全項目の仮スコア＋気づき", items: TASTE_KEYS, stage: "熱い", layout: "accordion" },
-  { key: "warm",  name: "ウォーム",    time: "〜20分",    sub: "2巡目：スコアを調整＋気づき", items: TASTE_KEYS, stage: "温かい", layout: "accordion" },
-  { key: "cold",  name: "コールド",    time: "〜30分",    sub: "最終確認：スコア確定・欠陥の確定", items: TASTE_KEYS, stage: "冷めた", layout: "accordion" },
+  // アロマは香りの気づきだけ残せるよう、語彙チップを欠陥系・フレーバー系に絞って表示（noteGroups）
+  { key: "aroma", name: "アロマ",      time: "0:00–4:00", sub: "注湯〜ブレイクの香り", items: ["aroma"], stage: "アロマ", noteGroups: ["欠陥系", "フレーバー系"], layout: "stack" },
+  { key: "hot",   name: "ホット",      time: "〜10分",    sub: "1巡目：全項目の仮スコア＋気づき", items: TASTE_KEYS, stage: "熱い", defects: true, layout: "accordion" },
+  { key: "warm",  name: "ウォーム",    time: "〜20分",    sub: "2巡目：スコアを調整＋気づき", items: TASTE_KEYS, stage: "温かい", defects: true, layout: "accordion" },
+  { key: "cold",  name: "コールド",    time: "〜30分",    sub: "最終確認：スコア確定・欠陥の確定", items: TASTE_KEYS, stage: "冷めた", defects: true, layout: "accordion" },
   { key: "wrap",  name: "まとめ",      time: "終了後",    sub: "総合メモ・比較・答え合わせ・書き出し" },
 ];
 
@@ -1171,11 +1172,9 @@ function buildSampleCard(id, step) {
     body.appendChild(row);
   });
 
-  // 温度帯ステップだけ：欠陥チェック＋語彙チップ＋メモ
-  if (step.stage) {
-    body.appendChild(buildDefectSection(id, step));
-    body.appendChild(buildNoteSection(id, step));
-  }
+  // 欠陥チェックは温度帯ステップだけ、語彙チップ＋メモは stage を持つステップ（アロマ含む）に表示
+  if (step.defects) body.appendChild(buildDefectSection(id, step));
+  if (step.stage) body.appendChild(buildNoteSection(id, step));
 
   card.appendChild(body);
   return card;
@@ -1230,8 +1229,9 @@ function buildNoteSection(id, step) {
   section.className = "card-section";
   section.innerHTML = `<div class="card-section-label">気づき（${stage}）— タップで追加</div>`;
 
-  // 語彙チップ（この温度帯で選択済みのものをハイライト）
-  NOTE_WORDS.forEach(g => {
+  // 語彙チップ（このステップで選択済みのものをハイライト）。noteGroups 指定があればそのグループだけ表示
+  const groups = step.noteGroups ? NOTE_WORDS.filter(g => step.noteGroups.includes(g.group)) : NOTE_WORDS;
+  groups.forEach(g => {
     const groupDiv = document.createElement("div");
     groupDiv.className = "word-group";
     groupDiv.innerHTML = `<div class="word-group-label">${g.group}</div>`;
