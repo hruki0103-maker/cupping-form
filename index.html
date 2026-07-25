@@ -846,18 +846,27 @@ function markDefect(word) {
   return groupOf(word) === "欠陥系" ? "⚠" + word : word;
 }
 
+// そのセッションで実際に記録がある温度帯だけを返す。
+// 時間切れなどで冷めた帯まで行けなかった回に、全部「—」の列が並ぶのを防ぐ。
+// 判定はセッション全体で行う（サンプルごとに列が変わると、サンプル間の比較ができなくなるため）
+function activeStages(s) {
+  return TEMP_STAGES.filter(stage =>
+    s.sampleOrder.some(id => s.samples[id] && notesAt(s.samples[id], stage).length > 0)
+  );
+}
+
 // 温度帯（列）× 語彙カテゴリ（行）の表。中身が空のカテゴリ行は出さない
-function tempTable(sm) {
+function tempTable(sm, stages) {
   const rows = [];
   EXPORT_ROWS.forEach(row => {
-    const cells = TEMP_STAGES.map(stage => notesAt(sm, stage).filter(w => groupOf(w) === row.group));
+    const cells = stages.map(stage => notesAt(sm, stage).filter(w => groupOf(w) === row.group));
     if (cells.every(c => c.length === 0)) return; // どの温度帯にも無いカテゴリは行ごと省く
     rows.push(`| ${row.label} | ${cells.map(cellText).join(" | ")} |`);
   });
   if (rows.length === 0) return []; // 温度帯のメモが1つも無ければ表自体を出さない
   return [
-    `|  | ${TEMP_STAGES.join(" | ")} |`,
-    `|---|${TEMP_STAGES.map(() => "---").join("|")}|`,
+    `|  | ${stages.join(" | ")} |`,
+    `|---|${stages.map(() => "---").join("|")}|`,
     ...rows,
   ];
 }
@@ -875,6 +884,14 @@ function buildExportText(s) {
   });
   lines.push("");
 
+  const stages = activeStages(s);
+  // 評価しなかった温度帯があれば1行で断る（列が無いのを「記録漏れ」と誤読しないように）
+  const skipped = TEMP_STAGES.filter(st => !stages.includes(st));
+  if (stages.length && skipped.length) {
+    lines.push(`> 記録なし: ${skipped.join("・")}帯`);
+    lines.push("");
+  }
+
   s.sampleOrder.forEach(id => {
     const sm = s.samples[id];
     if (sm.notes.length === 0 && !sm.freeNote) return;
@@ -883,7 +900,7 @@ function buildExportText(s) {
     lines.push(`### ${id}${r.batch ? " ＝ " + r.batch : ""}　${cvaScore(sm.scores)}点　${defectLabelsOf(sm)}`);
     lines.push("");
 
-    const table = tempTable(sm);
+    const table = tempTable(sm, stages);
     if (table.length) {
       lines.push(...table);
       lines.push("");
