@@ -731,6 +731,27 @@ const STEPS = [
   { key: "wrap",  name: "まとめ",      time: "終了後",    sub: "総合メモ・比較・答え合わせ・書き出し" },
 ];
 
+/* ---- 書き出し用の索引（STEPS・NOTE_WORDS から自動で作る） ----
+   語彙やステップを足しても、ここを直さなくて済むように定義から逆算している */
+
+// 語彙 → グループ名 の逆引き。書き出しで語彙をカテゴリ別の行に振り分けるのに使う
+const WORD_GROUP = {};
+NOTE_WORDS.forEach(g => g.words.forEach(w => WORD_GROUP[w] = g.group));
+
+// 表の列になる温度帯（欠陥チェックを持つステップ＝すすり評価の3帯）
+const TEMP_STAGES = STEPS.filter(s => s.defects && s.stage).map(s => s.stage);
+// 表に入れない香りのステージ（フレグランス・アロマ。温度帯ではないので表の外に並べる）
+const AROMA_STAGES = STEPS.filter(s => s.stage && !s.defects).map(s => s.stage);
+
+// 表の行になるカテゴリ。書き出し時の見出し名は語彙グループ名と変えている
+const EXPORT_ROWS = [
+  { group: "フレーバー系", label: "フレーバー" },
+  { group: "質感・構造",  label: "質感・構造" },
+  { group: "欠陥系",     label: "気になる点" },
+  { group: "温度変化",    label: "温度変化" },
+  { group: "その他",     label: "その他" }, // 語彙チップにない自由入力の受け皿
+];
+
 const STORAGE_KEY = "cupping_form_state_v1";
 
 // 端末のローカル時刻で今日の日付を作る（toISOStringはUTCのため、日本時間の朝9時前に前日になってしまう）
@@ -795,7 +816,52 @@ function cvaScore(scores) {
   return Math.round(raw * 4) / 4; // 0.25刻みに丸める
 }
 
-// Markdown書き出し（形式は旧版と同一。焙煎ログとの突き合わせを崩さない）
+/* ---- Markdown書き出し ----
+   旧版は「1語彙＝1行」でサンプル1つが約40行になり、見返すのが苦しかった。
+   温度帯を列・語彙カテゴリを行にした表にして、
+   「冷めてどう変わったか」を横読みできる形にしている。
+   サマリ表（サンプル／バッチ名／スコア／欠陥）は旧版のまま＝焙煎ログとの突き合わせを崩さない */
+
+function defectLabelsOf(sm) {
+  return sm.defects.map(k => DEFECTS.find(d => d.key === k).label).join("、") || "なし";
+}
+
+function groupOf(word) {
+  return WORD_GROUP[word] || "その他";
+}
+
+// あるサンプルの、ある温度帯につけた語彙だけを取り出す
+function notesAt(sm, stage) {
+  return sm.notes.filter(n => n.stage === stage).map(n => n.text);
+}
+
+// 表のセルに入れる文字列。`|` はそのまま書くと列が割れるのでエスケープする
+function cellText(words) {
+  if (!words.length) return "—";
+  return words.map(w => w.replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ")).join(", ");
+}
+
+// 欠陥系の語彙は目立たせる（表の外＝香りの行で使う。表の中はカテゴリ行で分かれるので不要）
+function markDefect(word) {
+  return groupOf(word) === "欠陥系" ? "⚠" + word : word;
+}
+
+// 温度帯（列）× 語彙カテゴリ（行）の表。中身が空のカテゴリ行は出さない
+function tempTable(sm) {
+  const rows = [];
+  EXPORT_ROWS.forEach(row => {
+    const cells = TEMP_STAGES.map(stage => notesAt(sm, stage).filter(w => groupOf(w) === row.group));
+    if (cells.every(c => c.length === 0)) return; // どの温度帯にも無いカテゴリは行ごと省く
+    rows.push(`| ${row.label} | ${cells.map(cellText).join(" | ")} |`);
+  });
+  if (rows.length === 0) return []; // 温度帯のメモが1つも無ければ表自体を出さない
+  return [
+    `|  | ${TEMP_STAGES.join(" | ")} |`,
+    `|---|${TEMP_STAGES.map(() => "---").join("|")}|`,
+    ...rows,
+  ];
+}
+
 function buildExportText(s) {
   const lines = [];
   lines.push(`## カッピング記録 ${s.sessionDate}${s.sessionNote ? "　" + s.sessionNote : ""}`);
@@ -805,16 +871,35 @@ function buildExportText(s) {
   s.sampleOrder.forEach(id => {
     const sm = s.samples[id];
     const r = s.reveal[id] || { batch: "" };
-    const defectLabels = sm.defects.map(k => DEFECTS.find(d => d.key === k).label).join("、") || "なし";
-    lines.push(`| ${id} | ${r.batch} | ${cvaScore(sm.scores)} | ${defectLabels} |`);
+    lines.push(`| ${id} | ${r.batch} | ${cvaScore(sm.scores)} | ${defectLabelsOf(sm)} |`);
   });
   lines.push("");
+
   s.sampleOrder.forEach(id => {
     const sm = s.samples[id];
     if (sm.notes.length === 0 && !sm.freeNote) return;
-    lines.push(`### サンプル ${id}`);
-    sm.notes.forEach(n => lines.push(`- [${n.stage}] ${n.text}`));
-    if (sm.freeNote) lines.push(`- [総合] ${sm.freeNote}`);
+    const r = s.reveal[id] || { batch: "" };
+    // 見出しに素性を集約：本文を読まなくても「どのバッチ・何点・欠陥は」が分かる
+    lines.push(`### ${id}${r.batch ? " ＝ " + r.batch : ""}　${cvaScore(sm.scores)}点　${defectLabelsOf(sm)}`);
+    lines.push("");
+
+    const table = tempTable(sm);
+    if (table.length) {
+      lines.push(...table);
+      lines.push("");
+    }
+
+    // 香りは温度帯ではないので表に入れず、下に1行ずつ並べる
+    AROMA_STAGES.forEach(stage => {
+      const words = notesAt(sm, stage);
+      if (words.length) lines.push(`- **${stage}**：${words.map(markDefect).join(" / ")}`);
+    });
+
+    // 総合メモは複数行で書かれることがある。そのまま出すとリストが崩れるので「／」で1行にたたむ
+    if (sm.freeNote) {
+      const joined = sm.freeNote.split("\n").map(t => t.trim()).filter(Boolean).join("／");
+      if (joined) lines.push(`- **総合**：${joined}`);
+    }
     lines.push("");
   });
   return lines.join("\n");
@@ -1357,8 +1442,8 @@ function renderWrap(step) {
   state.sampleOrder.forEach(id => {
     const s = state.samples[id];
     const tr = document.createElement("tr");
-    const defectLabels = s.defects.map(k => DEFECTS.find(d => d.key === k).label).join("、") || "なし";
-    tr.innerHTML = `<td>${escapeHtml(id)}</td><td class="score">${cvaScore(s.scores)}</td><td>${defectLabels}</td>`;
+    // 欠陥ラベルの組み立ては書き出しと同じ関数を使う（表示と書き出しがズレないように）
+    tr.innerHTML = `<td>${escapeHtml(id)}</td><td class="score">${cvaScore(s.scores)}</td><td>${escapeHtml(defectLabelsOf(s))}</td>`;
     tbody.appendChild(tr);
   });
   c.appendChild(comparePanel);
