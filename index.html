@@ -764,20 +764,24 @@ function defaultState() {
   return {
     sessionDate: todayLocal(),
     sessionNote: "",
+    sessionSummary: "", // セッション全体の総評（サンプル個別の freeNote とは別物）
     sampleOrder: ["A", "B", "C", "D", "E", "Ref"],
     currentSample: "A",
     currentStep: 0,
-    samples: {}, // { id: { scores:{}, defects:[], notes:[{stage,text}], freeNote:'' } }
+    samples: {}, // { id: { scores:{}, defects:[], defectStages:{}, notes:[{stage,text}], freeNote:'' } }
     reveal: {},  // { id: { batch:'' } }　※DT%・煎り止めBTはここには持たず、バッチ名から焙煎ログ側で突き合わせる
     milestones: { break: 4, hot: 10, warm: 20, cold: 30 }, // 分
     timer: { running: false, startedAt: null, elapsed: 0, notified: [] },
+    lastSavedAt: null, // Obsidianに保存した時刻。追記モードなので二重保存を警告するのに使う
   };
 }
 
 function emptySample() {
   const scores = {};
   CVA_ITEMS.forEach(i => scores[i.key] = 5);
-  return { scores, defects: [], notes: [], freeNote: "" };
+  // defects = このサンプルで出た欠陥（サマリ用）／defectStages = それをどの温度帯で感じたか
+  // 2つ持つ理由：旧データは defects しか持たないため、帯の情報は「あれば使う」追加情報にしている
+  return { scores, defects: [], defectStages: {}, notes: [], freeNote: "" };
 }
 
 // 旧版のデータに足りないフィールドを補完する（データ互換の要）
@@ -786,10 +790,14 @@ function migrate(parsed) {
   if (!s.milestones) s.milestones = defaultState().milestones;
   if (!s.timer) s.timer = defaultState().timer;
   if (!Array.isArray(s.timer.notified)) s.timer.notified = [];
+  if (typeof s.sessionSummary !== "string") s.sessionSummary = "";
   s.currentStep = Math.min(Math.max(0, Number(s.currentStep) || 0), STEPS.length - 1);
   if (!Array.isArray(s.sampleOrder)) s.sampleOrder = defaultState().sampleOrder;
   s.sampleOrder.forEach(id => {
     if (!s.samples[id]) s.samples[id] = emptySample();
+    // 旧データには defectStages が無い。空で補うと「欠陥はあるが帯は不明」として扱われる
+    if (!s.samples[id].defectStages) s.samples[id].defectStages = {};
+    if (!Array.isArray(s.samples[id].defects)) s.samples[id].defects = [];
     if (!s.reveal[id]) s.reveal[id] = { batch: "" };
   });
   if (!s.sampleOrder.includes(s.currentSample)) s.currentSample = s.sampleOrder[0] || null;
@@ -851,8 +859,31 @@ function markDefect(word) {
 // 判定はセッション全体で行う（サンプルごとに列が変わると、サンプル間の比較ができなくなるため）
 function activeStages(s) {
   return TEMP_STAGES.filter(stage =>
-    s.sampleOrder.some(id => s.samples[id] && notesAt(s.samples[id], stage).length > 0)
+    s.sampleOrder.some(id => {
+      const sm = s.samples[id];
+      if (!sm) return false;
+      // 語彙メモだけで判定すると、「語彙は打たずに欠陥だけチェックした帯」の列が
+      // 消えて欠陥の帯情報まで落ちる。欠陥の記録も"その帯を評価した証拠"として数える
+      return notesAt(sm, stage).length > 0 || sm.defects.some(k => defectStagesOf(sm, k).includes(stage));
+    })
   );
+}
+
+// 欠陥を「どの温度帯で感じたか」の行にする。
+// チッピング等は冷めてから表面化するため、いつ出たかが焙煎側の診断に効く
+function defectStagesOf(sm, key) {
+  return (sm.defectStages && sm.defectStages[key]) || [];
+}
+
+function defectRow(sm, stages) {
+  const cells = stages.map(stage =>
+    sm.defects
+      .filter(k => defectStagesOf(sm, k).includes(stage))
+      .map(k => DEFECTS.find(d => d.key === k).label)
+  );
+  // 帯の情報が1つも無い（旧データ）なら行を出さない。欠陥自体は見出しに出るので情報は失われない
+  if (cells.every(c => c.length === 0)) return null;
+  return `| 欠陥 | ${cells.map(cellText).join(" | ")} |`;
 }
 
 // 温度帯（列）× 語彙カテゴリ（行）の表。中身が空のカテゴリ行は出さない
@@ -863,6 +894,8 @@ function tempTable(sm, stages) {
     if (cells.every(c => c.length === 0)) return; // どの温度帯にも無いカテゴリは行ごと省く
     rows.push(`| ${row.label} | ${cells.map(cellText).join(" | ")} |`);
   });
+  const dr = defectRow(sm, stages);
+  if (dr) rows.push(dr); // 欠陥は最後（語彙より強い判定なので締めに置く）
   if (rows.length === 0) return []; // 温度帯のメモが1つも無ければ表自体を出さない
   return [
     `|  | ${stages.join(" | ")} |`,
@@ -889,6 +922,13 @@ function buildExportText(s) {
   const skipped = TEMP_STAGES.filter(st => !stages.includes(st));
   if (stages.length && skipped.length) {
     lines.push(`> 記録なし: ${skipped.join("・")}帯`);
+    lines.push("");
+  }
+
+  // セッション全体の総評。サンプル個別のメモに紛れ込ませないため、表の直後に置く
+  if (s.sessionSummary && s.sessionSummary.trim()) {
+    const joined = s.sessionSummary.split("\n").map(t => t.trim()).filter(Boolean).join("／");
+    lines.push(`**総評**　${joined}`);
     lines.push("");
   }
 
@@ -1314,9 +1354,11 @@ function buildSampleCard(id, step) {
 
 function buildDefectSection(id, step) {
   const sample = state.samples[id];
+  const stage = step.stage;
   const section = document.createElement("div");
   section.className = "card-section";
-  section.innerHTML = `<div class="card-section-label">欠陥チェック（3つの温度帯で共通）</div>`;
+  // 帯ごとのチェックに変更：チッピング等は冷めてから出るので「いつ出たか」を残す
+  section.innerHTML = `<div class="card-section-label">欠陥チェック（${stage}帯で感じたもの）</div>`;
   const grid = document.createElement("div");
   grid.className = "defect-grid";
   const info = document.createElement("p");
@@ -1324,14 +1366,25 @@ function buildDefectSection(id, step) {
   info.hidden = true;
 
   DEFECTS.forEach(d => {
-    const checked = sample.defects.includes(d.key);
+    const checked = defectStagesOf(sample, d.key).includes(stage);
     const chip = document.createElement("label");
     chip.className = "defect-chip" + (checked ? " checked" : "");
     chip.innerHTML = `<input type="checkbox" ${checked ? "checked" : ""}> ${d.label}<button type="button" class="defect-info-btn" aria-label="${d.label}の説明">[?]</button>`;
     chip.querySelector("input").onchange = (e) => {
-      const set = new Set(sample.defects);
-      if (e.target.checked) set.add(d.key); else set.delete(d.key);
-      sample.defects = Array.from(set);
+      if (!sample.defectStages) sample.defectStages = {};
+      const stages = new Set(defectStagesOf(sample, d.key));
+      if (e.target.checked) stages.add(stage); else stages.delete(stage);
+
+      // 帯の記録を更新し、サマリ用の defects と辻褄を合わせる
+      const defectSet = new Set(sample.defects);
+      if (stages.size) {
+        sample.defectStages[d.key] = TEMP_STAGES.filter(st => stages.has(st)); // 帯の順を保つ
+        defectSet.add(d.key);
+      } else {
+        delete sample.defectStages[d.key];
+        defectSet.delete(d.key);
+      }
+      sample.defects = DEFECTS.map(x => x.key).filter(k => defectSet.has(k));
       save();
       replaceCard(id, step);
     };
@@ -1351,6 +1404,18 @@ function buildDefectSection(id, step) {
   });
   section.appendChild(grid);
   section.appendChild(info);
+
+  // 帯ごとのチェックにすると全体像が見えなくなるので、この回の記録を1行で添える
+  if (sample.defects.length) {
+    const summary = document.createElement("p");
+    summary.className = "info-desc defect-summary";
+    summary.textContent = "このサンプルの欠陥： " + sample.defects.map(k => {
+      const label = DEFECTS.find(d => d.key === k).label;
+      const st = defectStagesOf(sample, k);
+      return label + (st.length ? `（${st.join("・")}）` : "（帯の記録なし）");
+    }).join(" ／ ");
+    section.appendChild(summary);
+  }
   return section;
 }
 
@@ -1439,7 +1504,7 @@ function renderWrap(step) {
         <span class="score">${cvaScore(sample.scores)}</span>
       </div>
       <div class="sample-card-body">
-        <textarea class="free-note" placeholder="全体の印象、次回への気づきなど">${escapeHtml(sample.freeNote)}</textarea>
+        <textarea class="free-note" placeholder="このサンプルの印象（全体の総評は下の「セッション総評」へ）">${escapeHtml(sample.freeNote)}</textarea>
       </div>`;
     card.querySelector("textarea").oninput = e => { sample.freeNote = e.target.value; save(); };
     c.appendChild(card);
@@ -1464,6 +1529,19 @@ function renderWrap(step) {
     tbody.appendChild(tr);
   });
   c.appendChild(comparePanel);
+
+  // セッション総評。比較表の直後・答え合わせより前に置く＝ブラインドのまま全体の印象を書ける
+  const summaryPanel = document.createElement("div");
+  summaryPanel.className = "panel";
+  summaryPanel.innerHTML = `
+    <div class="eyebrow">Session</div>
+    <h2>セッション総評</h2>
+    <p class="hint">5サンプル全体をまとめた印象。個別サンプルの話は上のカードへ書いてください</p>
+    <textarea class="free-note" id="sessionSummary" placeholder="例：全体的にフレーバー強度は弱めでややフラット寄り。酸質は全て柑橘系だった"></textarea>`;
+  const summaryInput = summaryPanel.querySelector("#sessionSummary");
+  summaryInput.value = state.sessionSummary;
+  summaryInput.oninput = e => { state.sessionSummary = e.target.value; save(); };
+  c.appendChild(summaryPanel);
 
   // 答え合わせ
   const revealPanel = document.createElement("div");
@@ -1501,13 +1579,26 @@ function renderWrap(step) {
       <button class="btn" id="copyBtn">コピー</button>
       <button class="btn" id="refreshExportBtn">最新の内容で更新</button>
     </div>
-    <p class="export-hint">セッションが終わってから1回だけ押してください（続けて押すと内容が重複して追記されます）</p>`;
+    <p class="export-hint">セッションが終わってから1回だけ押してください（続けて押すと内容が重複して追記されます）</p>
+    <p class="export-hint" id="lastSavedHint"></p>`;
   c.appendChild(exportPanel);
   renderExportArea();
 
   exportPanel.querySelector("#refreshExportBtn").onclick = renderExportArea;
   exportPanel.querySelector("#saveObsidianBtn").onclick = () => {
+    // Obsidian側は追記(mode=append)なので、2回押すと同じ内容がもう一度足される。
+    // 注意書きだけでは防げていなかったので、2回目以降は確認を挟む
+    if (state.lastSavedAt) {
+      const ok = confirm(
+        `この回はすでに ${formatSavedAt(state.lastSavedAt)} に保存しています。\n` +
+        `保存は「追記」なので、続けるとノートに同じ内容がもう一度足されます。\n\n本当に保存しますか？`
+      );
+      if (!ok) return;
+    }
     renderExportArea();
+    state.lastSavedAt = new Date().toISOString();
+    save();
+    renderLastSavedHint();
     window.location.href = buildObsidianUri();
   };
   exportPanel.querySelector("#copyBtn").onclick = () => {
@@ -1535,6 +1626,19 @@ function renderExportArea() {
   area.value = buildExportText(state);
   document.getElementById("obsidianTargetHint").textContent =
     `保存先: ${obsidianFilepath(state)}（ノートがなければ自動作成）`;
+  renderLastSavedHint();
+}
+
+// 端末のローカル時刻で「7/25 14:30」の形にする
+function formatSavedAt(iso) {
+  const d = new Date(iso);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function renderLastSavedHint() {
+  const el = document.getElementById("lastSavedHint");
+  if (!el) return;
+  el.textContent = state.lastSavedAt ? `⚠️ 保存済み: ${formatSavedAt(state.lastSavedAt)}（もう一度押すと追記されます）` : "";
 }
 
 // Obsidian側に「Advanced URI」プラグイン導入済みが前提。obsidian://adv-uri 経由で追記する
